@@ -84,6 +84,14 @@ export function formatCellValue(value, info) {
   switch (info.type) {
     case "many2one":
       return Array.isArray(value) ? value[1] : String(value);
+    case "many2many":
+      // Liste de couples [id, "Libellé"] (convention /offline_sync/read_record) :
+      // on affiche les libellés, pas "[object Object]" ni "1,2,3".
+      if (!Array.isArray(value)) return String(value);
+      return value
+        .map((item) => (Array.isArray(item) ? item[1] ?? `#${item[0]}` : item))
+        .filter((label) => label !== false && label !== undefined && label !== null)
+        .join(", ");
     case "boolean":
       return value ? "✓" : "";
     case "selection": {

@@ -1,0 +1,6 @@
+# Outils de test installés à la demande / fichiers générés
+node_modules/
+package.json
+package-lock.json
+.entry.js
+.app-test.mjs

@@ -218,6 +218,19 @@ export function renderListView(archXml, fieldsInfo, records, onRowClick, modelNa
       const tr = document.createElement("tr");
       tr.className = "o_data_row cursor-pointer";
 
+      // Enregistrement saisi dans la PWA et pas encore confirmé par Odoo
+      // (voir core/local_records.js) : signalé sans ambiguïté, l'utilisateur
+      // doit savoir que la ligne n'existe pas encore côté serveur.
+      if (record.__local__) {
+        tr.classList.add("o_data_row_local");
+        tr.title =
+          record.__local_status__ === "error"
+            ? "Enregistré localement — la synchronisation a échoué (voir le panneau Synchronisation)."
+            : record.__local_status__ === "conflict"
+              ? "Enregistré localement — en conflit avec une modification faite dans Odoo."
+              : "Enregistré localement — en attente de synchronisation.";
+      }
+
       const selTd = document.createElement("td");
       selTd.className = "o_list_record_selector user-select-none";
       const selWrap = document.createElement("div");
@@ -243,6 +256,18 @@ export function renderListView(archXml, fieldsInfo, records, onRowClick, modelNa
       });
 
       const gearTd = document.createElement("td");
+      if (record.__local__) {
+        const stateIcon = document.createElement("i");
+        stateIcon.className =
+          "fa o_local_record_icon " +
+          (record.__local_status__ === "error"
+            ? "fa-exclamation-circle text-danger"
+            : record.__local_status__ === "conflict"
+              ? "fa-exclamation-triangle text-warning"
+              : "fa-cloud-upload text-muted");
+        stateIcon.title = tr.title;
+        gearTd.appendChild(stateIcon);
+      }
       tr.appendChild(gearTd);
 
       tr.addEventListener("click", () => onRowClick(record.id));

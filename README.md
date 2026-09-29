@@ -25,6 +25,16 @@ via une API JSON authentifiée par clé API.
 5. ## Communication interne : 
    `core/bus/bus_service.js` (EventBus)
 
+6. ## Enregistrer hors-ligne : `core/local_records.js` (surcouche locale)
+   Le bouton nuage enregistre : l'action part dans `sync_queue` (IndexedDB). Pour qu'elle soit
+   **visible tout de suite**, `local_records.js` projette cette file sur les données déjà
+   chargées : une création apparaît en tête de liste avec un identifiant local `tmp:<uuid>`, une
+   modification s'applique sur la ligne, une suppression la masque. La fiche reste ouvrable et
+   modifiable (le formulaire relit le payload et amende la création en attente), et la liste se
+   rafraîchit seule à chaque synchronisation (`bus` → `sync:updated`). Rien n'est dupliqué en
+   base : la file reste l'unique source de vérité, donc aucune divergence avec ce qui est envoyé
+   à Odoo. Détail : `ANALYSE-ARCHITECTURE.md` §11 ; tests : `bash scripts/tests/run.sh`.
+
 # Odoo
 
 ## Installer

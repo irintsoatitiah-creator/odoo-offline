@@ -122,6 +122,13 @@ export async function syncPendingActions() {
 
       await db.sync_queue.update(localEntry.id, {
         status: mappedStatus,
+        // ID réel attribué par Odoo (create/write/call_method en renvoient un).
+        // Persisté car il sert ensuite à retrouver la fiche après coup : le
+        // formulaire d'un brouillon créé hors-ligne peut avoir été synchronisé
+        // entre-temps par la synchro automatique (voir form_controller.js),
+        // et il faut alors basculer de l'identifiant local "tmp:<uuid>" vers
+        // l'identifiant réel sans perdre la saisie en cours.
+        odoo_record_id: result.odoo_record_id || localEntry.odoo_record_id || null,
         error_message: result.error || null,
         conflict_details: result.conflicts ? JSON.stringify(result.conflicts) : null,
         requires_manual_action: result.requires_manual_action || false,

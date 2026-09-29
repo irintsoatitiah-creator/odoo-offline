@@ -2,7 +2,10 @@
  * service-worker.js
  */
 
-const CACHE_NAME = "offline-sync-standalone-v24";
+// À incrémenter à chaque modification des fichiers listés dans
+// ASSETS_TO_CACHE : le service worker supprime alors l'ancien cache et
+// retélécharge le bundle (sinon le navigateur ressert l'ancienne version).
+const CACHE_NAME = "offline-sync-standalone-v25";
 
 const ASSETS_TO_CACHE = [
   "./",

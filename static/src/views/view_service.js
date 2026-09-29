@@ -80,3 +80,28 @@ export function resolveModelViews(manifest, model, actionId) {
   }
   return modelViews.default || modelViews;
 }
+
+/**
+ * Domaine de l'action/menu en cours de consultation, tel que résolu par le
+ * serveur (voir controllers/metadata_controller.py — le domaine de l'action
+ * combiné à ses filtres de recherche par défaut, ex: "Devis" = state in
+ * ['draft','sent']).
+ *
+ * Utilisé côté PWA pour filtrer les enregistrements créés hors-ligne : sans
+ * ce domaine, un devis en brouillon apparaîtrait aussi dans la liste
+ * "Commandes" du même modèle sale.order.
+ *
+ * @returns {Array|null} le domaine Odoo, ou null si l'action n'en a pas.
+ */
+export function findActionDomain(manifest, model, actionId) {
+  if (!manifest || !Array.isArray(manifest.menus) || !actionId) return null;
+
+  const menu = manifest.menus.find(
+    (m) =>
+      m.model === model &&
+      String(m.action_id) === String(actionId) &&
+      Array.isArray(m.domain) &&
+      m.domain.length > 0
+  );
+  return menu ? menu.domain : null;
+}

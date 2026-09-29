@@ -17,6 +17,16 @@ import { runDocumentRules, validateDocument, computeStockEffects, computeOptimis
 import { collectFormData, buildDocumentGraph, applyDocumentGraphToDom, applyLineRowToDom } from "./form_serializer.js";
 import { addLedgerDelta, getAggregatedDeltasByField } from "../../core/local_ledger.js";
 import { patchCachedRecord } from "../../core/record_cache.js";
+import {
+  PENDING_STATUSES,
+  isLocalId,
+  localIdFromUuid,
+  uuidFromLocalId,
+  getLocalRecordValues,
+  getPendingEntry,
+  getPendingWritesForRecord,
+  applyPendingWritesToRecord,
+} from "../../core/local_records.js";
 import { router } from "../../core/browser/router_service.js";
 import {
   queueAction,
@@ -42,8 +52,12 @@ export async function mountFormController(container, params, env) {
 
   const apiKey = getApiKey();
 
-  let currentRecordId = id ? parseInt(id, 10) : null;
-  let pendingCreateUuid = null;
+  // Un identifiant "tmp:<uuid>" (voir core/local_records.js) désigne une fiche
+  // créée dans la PWA et pas encore synchronisée : elle n'a pas encore d'id
+  // Odoo, son état courant vit dans la file sync_queue, et l'enregistrer de
+  // nouveau revient à mettre à jour cette entrée (amendPendingCreate).
+  let pendingCreateUuid = id && isLocalId(id) ? uuidFromLocalId(id) : null;
+  let currentRecordId = id && !isLocalId(id) ? parseInt(id, 10) : null;
   let currentReferenceWriteDate = null;
   let currentReferenceValues = {};
   let currentContainer = null;
@@ -81,6 +95,28 @@ export async function mountFormController(container, params, env) {
   statusEl.textContent = "Chargement du formulaire...";
   container.appendChild(statusEl);
 
+  /**
+   * Identifiant à porter dans l'URL pour revenir à CETTE fiche : l'id Odoo
+   * s'il existe, sinon l'identifiant local "tmp:<uuid>" du brouillon (voir
+   * core/local_records.js) — c'est ce qui permet de rouvrir une fiche créée
+   * hors-ligne depuis la liste ou après un rechargement de l'onglet.
+   */
+  function currentStateId() {
+    if (currentRecordId) return currentRecordId;
+    return pendingCreateUuid ? localIdFromUuid(pendingCreateUuid) : undefined;
+  }
+
+  /** Message d'état adapté au pire statut d'envoi des actions en attente. */
+  function localStatusMessage(entries) {
+    if (entries.some((entry) => entry.status === "error")) {
+      return "Enregistré localement — la synchronisation a échoué (voir le panneau Synchronisation).";
+    }
+    if (entries.some((entry) => entry.status === "conflict")) {
+      return "Enregistré localement — un conflit doit être arbitré (voir le panneau Conflits).";
+    }
+    return "Enregistré localement — en attente de synchronisation avec Odoo.";
+  }
+
   try {
     const manifest = await getModuleManifest(module, apiKey, CONFIG.ODOO_BASE_URL);
     const modelViews = resolveModelViews(manifest, model, actionId);
@@ -111,11 +147,48 @@ export async function mountFormController(container, params, env) {
     }
 
     let initialValues = {};
+    let localPendingEntries = [];
+
+    // Fiche créée hors-ligne dont la synchronisation a abouti entre-temps
+    // (synchro automatique au retour du réseau) : l'identifiant "tmp:<uuid>"
+    // est périmé, on bascule sur l'id réel avant de charger la fiche.
+    if (pendingCreateUuid) {
+      const createEntry = await getPendingEntry(model, pendingCreateUuid);
+      if (!createEntry) {
+        pendingCreateUuid = null;
+      } else if (createEntry.odoo_record_id && !PENDING_STATUSES.includes(createEntry.status)) {
+        currentRecordId = createEntry.odoo_record_id;
+        pendingCreateUuid = null;
+        router.replaceState({ tag: "form_view", module, model, id: currentRecordId, actionId, listLabel });
+      }
+    }
+
     if (currentRecordId) {
       initialValues = await getRecordSmart(model, currentRecordId, apiKey, CONFIG.ODOO_BASE_URL);
+
+      // Modifications locales pas encore synchronisées : sans cette fusion,
+      // rouvrir hors-ligne un document déjà modifié hors-ligne réafficherait
+      // la version du cache, et la prochaine saisie écraserait la précédente.
+      localPendingEntries = await getPendingWritesForRecord(model, currentRecordId);
+      initialValues = await applyPendingWritesToRecord(model, initialValues, fieldsInfo);
+
       currentReferenceWriteDate = initialValues.__reference_write_date__ || null;
       const { __reference_write_date__, ...cleanValues } = initialValues;
       currentReferenceValues = cleanValues;
+    } else if (pendingCreateUuid) {
+      // Fiche créée dans la PWA : le payload de la file EST son état courant.
+      const localValues = await getLocalRecordValues(model, pendingCreateUuid);
+      const createEntry = await getPendingEntry(model, pendingCreateUuid);
+
+      if (localValues) {
+        initialValues = localValues;
+        currentReferenceValues = { ...localValues };
+        if (createEntry) localPendingEntries = [createEntry];
+      } else {
+        // Entrée illisible : on repart d'une fiche vierge plutôt que d'un
+        // écran vide (le brouillon reste dans la file, il sera synchronisé).
+        console.warn("[form_controller] Brouillon local illisible:", pendingCreateUuid);
+      }
     }
 
     const securityInfo = await getSecurityInfo(model);
@@ -135,12 +208,16 @@ export async function mountFormController(container, params, env) {
 
     cp.cloudBtn.addEventListener("click", saveRecord);
     cp.undoBtn.addEventListener("click", () => {
-      env.doAction({ tag: "form_view", module, model, id: currentRecordId, actionId, listLabel }, { replace: true });
+      env.doAction({ tag: "form_view", module, model, id: currentStateId(), actionId, listLabel }, { replace: true });
     });
 
-    statusEl.textContent = navigator.onLine ? "" : "Mode hors-ligne — données mises en cache.";
+    statusEl.textContent = localPendingEntries.length > 0
+      ? localStatusMessage(localPendingEntries)
+      : navigator.onLine ? "" : "Mode hors-ligne — données mises en cache.";
 
-    const recordLabel = currentRecordId ? initialValues.name || `#${currentRecordId}` : "Nouveau";
+    const recordLabel = currentRecordId
+      ? initialValues.name || `#${currentRecordId}`
+      : initialValues.name || "Nouveau";
     cp.breadcrumbCurrent.textContent = recordLabel;
   } catch (err) {
     console.error(err);
@@ -315,7 +392,14 @@ export async function mountFormController(container, params, env) {
    */
   async function onObjectButtonClick(methodName) {
     if (!currentRecordId) {
-      alert("Impossible d'exécuter cette action avant l'enregistrement de la fiche.");
+      // Un bouton objet s'exécute côté serveur sur un id réel : tant que la
+      // fiche créée hors-ligne n'est pas synchronisée, il n'y a rien sur quoi
+      // l'exécuter (voir core/local_records.js).
+      alert(
+        pendingCreateUuid
+          ? "Cette fiche a été créée hors-ligne : l'action sera disponible après sa synchronisation avec Odoo."
+          : "Impossible d'exécuter cette action avant l'enregistrement de la fiche."
+      );
       return;
     }
 
@@ -411,10 +495,14 @@ export async function mountFormController(container, params, env) {
         } else {
           const entry = await getSyncQueueEntry(pendingCreateUuid);
           if (entry && entry.odoo_record_id) {
+            // La synchronisation automatique a envoyé ce brouillon entre-temps
+            // (odoo_record_id est désormais persisté par syncPendingActions) :
+            // on bascule sur l'id réel sans perdre la saisie en cours.
             currentRecordId = entry.odoo_record_id;
             formData.id = currentRecordId;
             localUuid = await queueAction(model, "write", formData, "generic", currentReferenceWriteDate, currentReferenceValues);
             pendingCreateUuid = null;
+            router.replaceState({ tag: "form_view", module, model, id: currentRecordId, actionId, listLabel });
           } else {
             localUuid = await queueAction(model, "create", formData, "generic", currentReferenceWriteDate, currentReferenceValues);
             pendingCreateUuid = localUuid;
@@ -423,6 +511,20 @@ export async function mountFormController(container, params, env) {
       } else {
         localUuid = await queueAction(model, "create", formData, "generic", currentReferenceWriteDate, currentReferenceValues);
         pendingCreateUuid = localUuid;
+      }
+
+      // La fiche créée localement devient adressable sous son identifiant
+      // local : retour depuis la liste, rechargement de l'onglet ou lien
+      // profond rouvrent la même saisie au lieu d'une fiche vierge.
+      if (!currentRecordId && pendingCreateUuid) {
+        router.replaceState({
+          tag: "form_view",
+          module,
+          model,
+          id: localIdFromUuid(pendingCreateUuid),
+          actionId,
+          listLabel,
+        });
       }
 
       statusEl.textContent = "Enregistré localement — sera synchronisé dès que possible.";

@@ -6,10 +6,12 @@
  */
 
 import { buildStockPickingTypeDomain } from "./stock_picking_dashboard.js";
+import { bus } from "../../core/bus/bus_service.js";
 import { CONFIG, getApiKey, getUserId } from "../../core/browser/session.js";
 import { getSecurityInfo } from "../../core/user_service.js";
-import { getModuleManifest, resolveModelViews } from "../view_service.js";
+import { getModuleManifest, resolveModelViews, findActionDomain } from "../view_service.js";
 import { getListRecordsSmart, getPurchaseDashboardSmart } from "../../core/list_cache.js";
+import { applyLocalOverlay } from "../../core/local_records.js";
 import { formatCellValue } from "./list_renderer_utils.js";
 import { renderListView } from "./list_renderer.js";
 import { renderKanbanView } from "../kanban/kanban_renderer.js";
@@ -43,6 +45,8 @@ export async function mountListController(container, params, env) {
   let currentViewFieldsInfo = null;
   let activeDashboardFilter = null;
   let searchDebounceTimer = null;
+  let actionDomain = null;
+  let listRefreshTimer = null;
 
   // --- Construction of the control panel specific to this view ---
   const cp = buildControlPanel({
@@ -184,10 +188,71 @@ export async function mountListController(container, params, env) {
     updatePagerDisplay();
   }
 
+  /**
+   * Charge (ou recharge) les données de la liste : cache/serveur, puis
+   * surcouche des modifications locales non synchronisées (voir
+   * core/local_records.js). Isolée dans une fonction car rappelée à chaque
+   * événement "sync:updated" : une création hors-ligne doit apparaître dans
+   * la liste, et disparaître de la surcouche une fois réellement
+   * synchronisée avec Odoo.
+   */
+  async function loadListData() {
+    let loadError = null;
+    let records = [];
+
+    try {
+      const listData = await getListRecordsSmart(model, apiKey, CONFIG.ODOO_BASE_URL, actionId, extraDomain);
+      records = listData.records || [];
+    } catch (err) {
+      // Hors-ligne sans cache : on affiche malgré tout les saisies locales
+      // plutôt qu'un écran d'erreur (voir surcouche ci-dessous).
+      loadError = err;
+      console.warn("[list_controller] Liste indisponible, surcouche locale seule :", err);
+    }
+
+    // Applique les record rules (ir.rule) mises en cache par user_service.js
+    // -- jusqu'ici récupérées mais jamais utilisées (voir audit rules_engine).
+    const securityInfo = await getSecurityInfo(model);
+    allRecordsRaw = filterByRecordRule(model, records, securityInfo);
+
+    // Créations/modifications/suppressions encore locales, en tête de liste.
+    allRecordsRaw = await applyLocalOverlay(model, allRecordsRaw, currentViewFieldsInfo, {
+      domain: actionDomain,
+      extraDomain,
+    });
+
+    applySearchFilter();
+
+    const lastPage = Math.max(0, Math.ceil(allRecords.length / PAGE_SIZE) - 1);
+    if (currentPage > lastPage) currentPage = lastPage;
+
+    renderCurrentPage();
+
+    if (loadError && allRecords.length === 0) {
+      statusEl.textContent = "Erreur : " + loadError.message;
+    } else if (loadError) {
+      statusEl.textContent = "Hors-ligne — seules les saisies locales sont affichées.";
+    } else {
+      statusEl.textContent = navigator.onLine ? "" : "Mode hors-ligne — liste mise en cache.";
+    }
+  }
+
+  // Toute synchronisation (réussie ou en échec) change ce que la surcouche
+  // doit montrer : une action "sent" sort de la file, un conflit y entre.
+  const onSyncUpdated = () => {
+    clearTimeout(listRefreshTimer);
+    listRefreshTimer = setTimeout(() => {
+      loadListData().catch((err) => console.warn("[list_controller] Rafraîchissement après synchro échoué:", err));
+    }, 300);
+  };
+
   try {
     const manifest = await getModuleManifest(module, apiKey, CONFIG.ODOO_BASE_URL);
     currentModelViews = resolveModelViews(manifest, model, actionId);
     currentViewFieldsInfo = manifest.fields[model];
+    // Domaine de l'action/menu en cours : sert à ne pas afficher une saisie
+    // locale dans une liste qui ne la concerne pas (Devis vs Commandes).
+    actionDomain = findActionDomain(manifest, model, actionId);
 
     if (!currentModelViews) {
       statusEl.textContent = `Aucune vue disponible pour "${model}".`;
@@ -234,22 +299,19 @@ export async function mountListController(container, params, env) {
       }
     }
 
-    const listData = await getListRecordsSmart(model, apiKey, CONFIG.ODOO_BASE_URL, actionId, extraDomain);
-    // Applique les record rules (ir.rule) mises en cache par user_service.js
-    // -- jusqu'ici récupérées mais jamais utilisées (voir audit rules_engine).
-    const securityInfo = await getSecurityInfo(model);
-    allRecordsRaw = filterByRecordRule(model, listData.records || [], securityInfo);
-    applySearchFilter();
-    renderCurrentPage();
-
-    statusEl.textContent = navigator.onLine ? "" : "Mode hors-ligne — liste mise en cache.";
+    await loadListData();
   } catch (err) {
     console.error(err);
     statusEl.textContent = "Erreur : " + err.message;
   }
 
+  // Le rafraîchissement n'a de sens que si la vue a été montée avec succès.
+  bus.subscribe("sync:updated", onSyncUpdated);
+
   function cleanup() {
     clearTimeout(searchDebounceTimer);
+    clearTimeout(listRefreshTimer);
+    bus.unsubscribe("sync:updated", onSyncUpdated);
     if (listContainer._currentView?._cleanup) {
       listContainer._currentView._cleanup();
     }

@@ -4,6 +4,7 @@
 
 import { queueAction } from "../../../core/network/rpc_service.js";
 import { getReferenceRecords } from "../../../core/name_service.js";
+import { isLocalId, getPendingRecordLabel } from "../../../core/local_records.js";
 
 async function createLocalRecord(relationModel, name) {
   const localUuid = await queueAction(relationModel, "create", { name }, "generic");
@@ -72,12 +73,23 @@ export function renderMany2oneField(name, info, node, initialValue) {
   let cachedRecords = [];
   getReferenceRecords(info.relation).then((records) => {
     cachedRecords = records;
-    if (initialValue) {
+    if (initialValue && !isLocalId(initialValue)) {
       hiddenId.value = initialValue;
       const found = cachedRecords.find((r) => r.id === initialValue);
       if (found) input.value = found.display_name;
     }
   }).catch((err) => console.warn(`Relation ${info.relation}:`, err));
+
+  // Référence vers un enregistrement créé localement ("tmp:<uuid>", voir
+  // core/local_records.js) : par définition absent de reference_records, son
+  // libellé est celui saisi dans la fiche liée — sans quoi rouvrir une fiche
+  // hors-ligne afficherait un champ vide au lieu du partenaire choisi.
+  if (isLocalId(initialValue)) {
+    hiddenId.value = initialValue;
+    getPendingRecordLabel(info.relation, initialValue)
+      .then((label) => { if (label) input.value = label; })
+      .catch((err) => console.warn(`Relation locale ${info.relation}:`, err));
+  }
 
   function closeDropdown() {
     dropdown.style.display = "none";
